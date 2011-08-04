@@ -121,9 +121,9 @@ class AtomBuilder(object):
             yield '</updated>\n'
             link = self.get_entry_link(entry)
             if link:
-                yield '    <link>'
-                yield self.escape(link)
-                yield '</link>\n'
+                yield '    <link href="'
+                yield self.escape(link).replace('"', '&quot;')
+                yield '"/>\n'
             author = self.get_entry_author(entry)
             if author:
                 yield '    <author><name>'
