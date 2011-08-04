@@ -9,6 +9,16 @@ from xml.sax.saxutils import escape as xml_escape
 from dulwich.repo import Repo
 
 
+ATOM_FEED_REQUIRED = ('title', 'id', 'updated')
+ATOM_ENTRY_REQUIRED = ('title', 'id', 'updated')
+
+# Recommended and optional
+ATOM_FEED_OPTIONAL = ('author', 'link', 'category', 'contributor', 'rights',
+    'generator', 'icon', 'logo', 'subtitle')
+ATOM_ENTRY_OPTIONAL = ('author', 'link', 'category', 'contributor', 'rights',
+    'content', 'summary', 'published', 'source')
+
+
 def get_all_branches(repo):
     """
     Return the hash of each local branch.
@@ -62,87 +72,105 @@ class FixedOffsetTimezone(datetime.tzinfo):
         return datetime.timedelta(0)
 
 
-class AtomizerFormatter(string.Formatter):
+def parse_timestamp(timestamp, timezone):
     """
-    The same Formatter that implements `str.format`, but with an additional
-    conversion scheme:
-
-    * 'x' encodes an unicode string into UTF-8 and escapes it for XML
-    * 't' formats a (timestamp, timezone) tuple in ISO format.
-      `timestamp` is a POSIX timestamp in seconds and `timezone` is in
-      seconds east of UTC. They are what Dulwich puts in `Commit.commit_time`
-      and `Commit.commit_timezone`
+    Get a POSIX `timestamp` and a `timezone` is seconds east of UTC (as
+    found in Dulwich’s  `Commit.commit_time` and `Commit.commit_timezone`)
+    and return a timezone-aware datetime object.
     """
-    def convert_field(self, value, conversion):
-        if conversion == 'x':
-            return xml_escape(value.encode('utf8'))
-        elif conversion == 't':
-            timestamp, timezone = value
-            return datetime.datetime.fromtimestamp(timestamp,
-                FixedOffsetTimezone(timezone)).isoformat()
-        else:
-            return super(AtomizerFormatter, self).convert_field(
-                value, conversion)
+    tzinfo = FixedOffsetTimezone(timezone)
+    return datetime.datetime.fromtimestamp(timestamp, tzinfo)
 
 
-def build_atom_feed(entries, feed_title, feed_link):
+def _format_xml(tag, content):
+    tag = tag.encode('utf8') # assume it is XML-safe
+    content = xml_escape(content.encode('utf8'))
+    return '<{tag}>{content}</{tag}>\n'.format(**locals())
+
+
+def _dict_to_xml(data, required_keys, optional_keys):
+    for key in required_keys:
+        yield _format_xml(key, data[key])
+
+    for key in optional_keys:
+        if key in data:
+            yield _format_xml(key, data[key])
+
+
+def build_atom_feed(feed_data):
     """
     Yield fragments of an Atom feed as byte-strings.
     """
-    # http://tools.ietf.org/html/rfc4287
-    # http://www.atomenabled.org/developers/syndication/
-    # Feed elements
-    #    Required: id, title, updated
-    #    Recommended: author, link
-    #    Optional: category, contributor, generator, icon, logo,
-    #              rights, subtitle
-    # Entry elements:
-    #    Required: id, title, updated
-    #    Recommended: author, link, content, summary
-    #    Optional: category, contributor, published, source, rights
-    format = AtomizerFormatter().format
-    assert len(entries) > 0
-    yield format(
-        (
-            '<?xml version="1.0" encoding="utf-8"?>\n'
-            '<feed xmlns="http://www.w3.org/2005/Atom">\n'
-	        '  <title>{title!x}</title>\n'
-	        '  <id>{link!x}</id>\n'
-	        '  <link>{link!x}</link>\n'
-	        '  <updated>{updated!t}</updated>\n'
-        ),
-	    title=feed_title,
-        link=feed_link,
-        updated=max(entry['updated'] for entry in entries),
-    )
-    if feed_link:
-        yield format('  <link>{link!x}</link>\n', link=feed_link)
+    yield '<?xml version="1.0" encoding="utf-8"?>\n' \
+          '<feed xmlns="http://www.w3.org/2005/Atom">\n'
+
+    feed_data = dict(feed_data)
+
+    for fragment in _dict_to_xml(feed_data,
+            ATOM_FEED_REQUIRED, ATOM_FEED_OPTIONAL):
+        yield '  ' + fragment
+
+    entries = feed_data.pop('entries')
+
     for entry in entries:
-        yield format(
-            (
-                '  <entry>\n'
-	            '    <title>{title!x}</title>\n'
-	            '    <id>{feed_link!x}#{id!x}</id>\n'
-	            '    <updated>{updated!t}</updated>\n'
-                '  </entry>\n'
-            ),
-            feed_link=feed_link,
-            **entry
-        )
+        entry = dict(entry)
+        yield '  <entry>\n'
+        for fragment in _dict_to_xml(dict(entry),
+                ATOM_ENTRY_REQUIRED, ATOM_ENTRY_OPTIONAL):
+            yield '    ' + fragment
+        yield '  </entry>\n'
     yield '</feed>'
 
 
-def main():
-    repo = Repo('.')
+def build_feed_data(repo):
+    """
+    Return a data structure matching that of an Atom feed:
+    a dict with the following keys:
+
+    * Required: id, title, updated, entries
+    * Recommended: author, link
+    * Optional: category, contributor, generator, icon, logo, rights, subtitle
+
+    All values should be unicode strings except `entries` which is a list of
+    dicts with the following keys:
+
+    * Required: id, title, updated
+    * Recommended: author, link, content, summary
+    * Optional: category, contributor, published, source, rights
+
+    Again, all values should be unicode strings.
+
+    See http://tools.ietf.org/html/rfc4287 and
+    http://www.atomenabled.org/developers/syndication/
+    """
+    feed_id = 'http://example.org/feed'
     entries = []
     for hash_, commit in get_latest_commits(repo):
+        date = parse_timestamp(commit.commit_time, commit.commit_timezone)
+        message = commit.message.strip()
         entries.append(dict(
-            id=hash_,
-            updated=(commit.commit_time, commit.commit_timezone),
-            title=commit.message.split('\n', 1)[0]
+            id='{}#{}'.format(feed_id, hash_),
+            updated=date.isoformat(),
+            title=message.split('\n', 1)[0],
+            content=message,
         ))
-    print ''.join(build_atom_feed(entries, 'Git commits',
-        'http://example.org/feed'))
+    return dict(
+        id=feed_id,
+        title='Git commits',
+        updated=max(entry['updated'] for entry in entries),
+        entries=entries,
+    )
+
+
+def build_commit_feed(repository_path, data_builder=build_feed_data):
+    """
+    Return an Atom feed as a byte string.
+    """
+    return ''.join(build_atom_feed(data_builder(Repo(repository_path))))
+
+
+def main():
+    print build_commit_feed('.')
 
 
 if __name__ == '__main__':
