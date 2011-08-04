@@ -6,6 +6,7 @@ import collections
 import string
 import datetime
 import operator
+import subprocess
 from xml.sax.saxutils import escape as xml_escape
 
 from dulwich.repo import Repo
@@ -128,6 +129,11 @@ class AtomBuilder(object):
                 yield '    <author><name>'
                 yield self.escape(author)
                 yield '</name></author>\n'
+            content = self.get_entry_html_content(entry)
+            if content:
+                yield '    <content type="html">'
+                yield self.escape(content)
+                yield '</content>\n'
             yield'  </entry>\n'
 
         yield '</feed>'
@@ -229,6 +235,29 @@ class AtomBuilder(object):
         """
         return None
 
+    def get_entry_text_content(self, entry):
+        """
+        Optional plain text content describing the given entry,
+        as an unicode string.
+
+        May be overriden.
+        """
+        return None
+
+    def get_entry_html_content(self, entry):
+        """
+        Optional HTML content describing the given entry,
+        as an unicode string.
+
+        May be overriden. Defaults to the result of get_entry_text_content
+        in a <pre> element.
+        """
+        text = self.get_entry_text_content(entry)
+        if text:
+            return u'<pre>{}</pre>'.format(xml_escape(text))
+        else:
+            return None
+
 
 class GitCommitsAtomBuilder(AtomBuilder):
     """
@@ -256,6 +285,22 @@ class GitCommitsAtomBuilder(AtomBuilder):
         # `commit.author` looks like 'Author Name <email@example.org>',
         # only keep 'Author Name'.
         return commit.author.split('<', 1)[0].strip()
+
+    def get_commit_diff(self, commit):
+        process = subprocess.Popen(
+            ['git', 'show', '--format=%B', '--stat', '--patch', commit.id],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+        returncode = process.wait()
+        if returncode != 0:
+            raise RuntimeError('git show returned with code %i, stderr: %s' %
+                (returncode, stderr))
+        # Just assume UTF-8 ... we need unicode while git only cares
+        # about bytes.
+        return stdout.decode('utf8')
+
+    def get_entry_text_content(self, commit):
+        return self.get_commit_diff(commit)
 
 
 class GithubAtomBuilder(GitCommitsAtomBuilder):
