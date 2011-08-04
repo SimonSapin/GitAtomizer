@@ -123,6 +123,11 @@ class AtomBuilder(object):
                 yield '    <link>'
                 yield self.escape(link)
                 yield '</link>\n'
+            author = self.get_entry_author(entry)
+            if author:
+                yield '    <author><name>'
+                yield self.escape(author)
+                yield '</name></author>\n'
             yield'  </entry>\n'
 
         yield '</feed>'
@@ -216,6 +221,14 @@ class AtomBuilder(object):
         """
         return None
 
+    def get_entry_author(self, entry):
+        """
+        Optional author name for the given entry, as an unicode string.
+
+        May be overriden. Otherwise there is no link.
+        """
+        return None
+
 
 class GitCommitsAtomBuilder(AtomBuilder):
     """
@@ -238,6 +251,11 @@ class GitCommitsAtomBuilder(AtomBuilder):
 
     def get_entry_updated(self, commit):
         return parse_timestamp(commit.commit_time, commit.commit_timezone)
+
+    def get_entry_author(self, commit):
+        # `commit.author` looks like 'Author Name <email@example.org>',
+        # only keep 'Author Name'.
+        return commit.author.split('<', 1)[0].strip()
 
 
 class GithubAtomBuilder(GitCommitsAtomBuilder):
