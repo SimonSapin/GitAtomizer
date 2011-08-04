@@ -299,8 +299,14 @@ class GitCommitsAtomBuilder(AtomBuilder):
         # about bytes.
         return stdout.decode('utf8')
 
-    def get_entry_text_content(self, commit):
-        return self.get_commit_diff(commit)
+    def get_entry_html_content(self, commit):
+        from pygments import highlight
+        from pygments.lexers import DiffLexer
+        from pygments.formatters import HtmlFormatter
+
+        diff = self.get_commit_diff(commit)
+        return highlight(diff, DiffLexer(), HtmlFormatter(
+            noclasses=True, nobackground=True))
 
 
 class GithubAtomBuilder(GitCommitsAtomBuilder):
