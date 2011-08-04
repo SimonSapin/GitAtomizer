@@ -2,6 +2,8 @@
 # coding: utf8
 
 import collections
+import string
+import datetime
 
 from dulwich.repo import Repo
 
@@ -43,10 +45,51 @@ def get_latest_commits(repo, max_count=10, heads=None):
     return commits[:max_count]
 
 
+class FixedOffsetTimezone(datetime.tzinfo):
+    """
+    A tzinfo implemtation for a fixed offset. (Once again.)
+
+    :param offset: seconds east of UTC
+    """
+    def __init__(self, offset):
+        self.delta = datetime.timedelta(seconds=offset)
+
+    def utcoffset(self, _dt):
+        return self.delta
+
+    def dst(self, _dt):
+        return datetime.timedelta(0)
+
+
+class AtomizerFormatter(string.Formatter):
+    """
+    The same Formatter that implements `str.format`, but with an additional
+    conversion scheme:
+
+    * 'x' encodes an unicode string into UTF-8 and escapes it for XML
+    * 't' formates a (timestamp, timezone) tuple in ISO format.
+      `timestamp` is a POSIX timestamp in seconds and `timezone` is in
+      seconds east of UTC. They are what Dulwich puts in `Commit.commit_time`
+      and `Commit.commit_timezone`
+    """
+    def convert_field(self, value, conversion):
+        if conversion == 'x':
+            return xml_escape(value.encode('utf8'))
+        elif conversion == 't':
+            timestamp, timezone = value
+            return datetime.datetime.fromtimestamp(timestamp,
+                FixedOffsetTimezone(timezone)).isoformat()
+        else:
+            return super(AtomizerFormatter, self).convert_field(
+                value, conversion)
+
+
 def main():
     repo = Repo('.')
+    format = AtomizerFormatter().format
     for hash_, c in get_latest_commits(repo):
-        print hash_
+        print format('{0} {1!t}', hash_,
+            (c.commit_time, c.commit_timezone))
 
 
 if __name__ == '__main__':
