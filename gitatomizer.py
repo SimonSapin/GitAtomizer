@@ -4,6 +4,7 @@
 import collections
 import string
 import datetime
+from xml.sax.saxutils import escape as xml_escape
 
 from dulwich.repo import Repo
 
@@ -47,7 +48,7 @@ def get_latest_commits(repo, max_count=10, heads=None):
 
 class FixedOffsetTimezone(datetime.tzinfo):
     """
-    A tzinfo implemtation for a fixed offset. (Once again.)
+    A tzinfo implementation for a fixed offset. (Once again.)
 
     :param offset: seconds east of UTC
     """
@@ -67,7 +68,7 @@ class AtomizerFormatter(string.Formatter):
     conversion scheme:
 
     * 'x' encodes an unicode string into UTF-8 and escapes it for XML
-    * 't' formates a (timestamp, timezone) tuple in ISO format.
+    * 't' formats a (timestamp, timezone) tuple in ISO format.
       `timestamp` is a POSIX timestamp in seconds and `timezone` is in
       seconds east of UTC. They are what Dulwich puts in `Commit.commit_time`
       and `Commit.commit_timezone`
@@ -84,12 +85,64 @@ class AtomizerFormatter(string.Formatter):
                 value, conversion)
 
 
+def build_atom_feed(entries, feed_title, feed_link):
+    """
+    Yield fragments of an Atom feed as byte-strings.
+    """
+    # http://tools.ietf.org/html/rfc4287
+    # http://www.atomenabled.org/developers/syndication/
+    # Feed elements
+    #    Required: id, title, updated
+    #    Recommended: author, link
+    #    Optional: category, contributor, generator, icon, logo,
+    #              rights, subtitle
+    # Entry elements:
+    #    Required: id, title, updated
+    #    Recommended: author, link, content, summary
+    #    Optional: category, contributor, published, source, rights
+    format = AtomizerFormatter().format
+    assert len(entries) > 0
+    yield format(
+        (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<feed xmlns="http://www.w3.org/2005/Atom">\n'
+	        '  <title>{title!x}</title>\n'
+	        '  <id>{link!x}</id>\n'
+	        '  <link>{link!x}</link>\n'
+	        '  <updated>{updated!t}</updated>\n'
+        ),
+	    title=feed_title,
+        link=feed_link,
+        updated=max(entry['updated'] for entry in entries),
+    )
+    if feed_link:
+        yield format('  <link>{link!x}</link>\n', link=feed_link)
+    for entry in entries:
+        yield format(
+            (
+                '  <entry>\n'
+	            '    <title>{title!x}</title>\n'
+	            '    <id>{feed_link!x}#{id!x}</id>\n'
+	            '    <updated>{updated!t}</updated>\n'
+                '  </entry>\n'
+            ),
+            feed_link=feed_link,
+            **entry
+        )
+    yield '</feed>'
+
+
 def main():
     repo = Repo('.')
-    format = AtomizerFormatter().format
-    for hash_, c in get_latest_commits(repo):
-        print format('{0} {1!t}', hash_,
-            (c.commit_time, c.commit_timezone))
+    entries = []
+    for hash_, commit in get_latest_commits(repo):
+        entries.append(dict(
+            id=hash_,
+            updated=(commit.commit_time, commit.commit_timezone),
+            title=commit.message.split('\n', 1)[0]
+        ))
+    print ''.join(build_atom_feed(entries, 'Git commits',
+        'http://example.org/feed'))
 
 
 if __name__ == '__main__':
