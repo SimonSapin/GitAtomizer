@@ -1,22 +1,14 @@
 #!/usr/bin/env python
 # coding: utf8
 
+import os.path
 import collections
 import string
 import datetime
+import operator
 from xml.sax.saxutils import escape as xml_escape
 
 from dulwich.repo import Repo
-
-
-ATOM_FEED_REQUIRED = ('title', 'id', 'updated')
-ATOM_ENTRY_REQUIRED = ('title', 'id', 'updated')
-
-# Recommended and optional
-ATOM_FEED_OPTIONAL = ('author', 'link', 'category', 'contributor', 'rights',
-    'generator', 'icon', 'logo', 'subtitle')
-ATOM_ENTRY_OPTIONAL = ('author', 'link', 'category', 'contributor', 'rights',
-    'content', 'summary', 'published', 'source')
 
 
 def get_all_branches(repo):
@@ -46,13 +38,13 @@ def get_latest_commits(repo, max_count=10, heads=None):
             continue
         seen_hashes.add(hash_)
         commit = repo.commit(hash_)
-        commits.append((hash_, commit))
+        commits.append(commit)
         if depth < max_count:
             for parent in commit.parents:
                 queue.append((parent, depth + 1))
 
     # Only keep the `max_count` latest commits
-    commits.sort(key=lambda (hash_, commit): commit.commit_time, reverse=True)
+    commits.sort(key=operator.attrgetter('commit_time'), reverse=True)
     return commits[:max_count]
 
 
@@ -88,89 +80,196 @@ def _format_xml(tag, content):
     return '<{tag}>{content}</{tag}>\n'.format(**locals())
 
 
-def _dict_to_xml(data, required_keys, optional_keys):
-    for key in required_keys:
-        yield _format_xml(key, data[key])
-
-    for key in optional_keys:
-        if key in data:
-            yield _format_xml(key, data[key])
-
-
-def build_atom_feed(feed_data):
+class AtomBuilder(object):
     """
-    Yield fragments of an Atom feed as byte-strings.
+    Abstract class building Atom feeds.
     """
-    yield '<?xml version="1.0" encoding="utf-8"?>\n' \
-          '<feed xmlns="http://www.w3.org/2005/Atom">\n'
 
-    feed_data = dict(feed_data)
+    def build(self):
+        return ''.join(self.build_fragments())
 
-    for fragment in _dict_to_xml(feed_data,
-            ATOM_FEED_REQUIRED, ATOM_FEED_OPTIONAL):
-        yield '  ' + fragment
+    def escape(self, value):
+        """
+        Encode an unicode `value` in UTF-8 and XML-escape it.
+        """
+        return xml_escape(value.encode('utf8'))
 
-    entries = feed_data.pop('entries')
+    def build_fragments(self):
+        yield ('<?xml version="1.0" encoding="utf-8"?>\n'
+               '<feed xmlns="http://www.w3.org/2005/Atom">\n'
+               '  <id>')
+        yield self.escape(self.get_feed_id())
+        yield '</id>\n  <title>'
+        yield self.escape(self.get_feed_title())
+        yield '</title>\n  <updated>'
+        yield self.get_feed_updated().isoformat()
+        yield '</updated>\n'
+        link = self.get_feed_link()
+        if link:
+            yield '  <link>'
+            yield self.escape(link)
+            yield '</link>\n'
 
-    for entry in entries:
-        entry = dict(entry)
-        yield '  <entry>\n'
-        for fragment in _dict_to_xml(dict(entry),
-                ATOM_ENTRY_REQUIRED, ATOM_ENTRY_OPTIONAL):
-            yield '    ' + fragment
-        yield '  </entry>\n'
-    yield '</feed>'
+        for entry in self.get_entries():
+            yield '  <entry>\n    <id>'
+            yield self.escape(self.get_entry_id(entry))
+            yield '</id>\n    <title>'
+            yield self.escape(self.get_entry_title(entry))
+            yield '</title>\n    <updated>'
+            yield self.get_entry_updated(entry).isoformat()
+            yield '</updated>\n'
+            link = self.get_entry_link(entry)
+            if link:
+                yield '    <link>'
+                yield self.escape(link)
+                yield '</link>\n'
+            yield'  </entry>\n'
+
+        yield '</feed>'
+
+    ## Required
+
+    def get_entries(self):
+        """
+        Return a iterable of objects, one for each entry in the feed.
+        These objects can be anything and are passed to get_entry_* methods.
+
+        Must be overriden.
+        """
+        raise NotImplementedError
+
+    def get_feed_updated(self):
+        """
+        Date of the last significant update to the feed, as a datetime object.
+
+        Defaults to the latest update date of its entries, can be overriden.
+        """
+        return max(self.get_entry_updated(entry)
+                   for entry in self.get_entries())
+
+    def get_feed_title(self):
+        """
+        The title of the feed, as an unicode string.
+
+        Must be overriden.
+        """
+        raise NotImplementedError
+
+    def get_feed_id(self):
+        """
+        A unique identifier for this feed, as an unicode string.
+
+        Defaults to the feed’s link if there is one. Must be overriden
+        if there is no link.
+        """
+        link = self.get_feed_link()
+        if link:
+            return link
+        else:
+            raise NotImplementedError
+
+    def get_entry_title(self, entry):
+        """
+        The title for the given entry, as an unicode string.
+        Must be overriden.
+        """
+        raise NotImplementedError
+
+    def get_entry_id(self, entry):
+        """
+        A unique identifier for the given entry, as an unicode string.
+        Must be overriden.
+
+        Defaults to the entry’s link if there is one. Must be overriden
+        if there is no link.
+        """
+        link = self.get_entry_link(entry)
+        if link:
+            return link
+        else:
+            raise NotImplementedError
+
+    def get_entry_updated(self, entry):
+        """
+        The date of the last significant update to the given entry, as a
+        datetime object.
+
+        Must be overriden.
+        """
+        raise NotImplementedError
+
+    ## Recommended
+
+    def get_feed_link(self):
+        """
+        Optional link for the feed, as an unicode string.
+
+        May be overriden. Otherwise there is no link.
+        """
+        return None
+
+    def get_entry_link(self, entry):
+        """
+        Optional link for the given entry, as an unicode string.
+
+        May be overriden. Otherwise there is no link.
+        """
+        return None
 
 
-def build_feed_data(repo):
+class GitCommitsAtomBuilder(AtomBuilder):
     """
-    Return a data structure matching that of an Atom feed:
-    a dict with the following keys:
-
-    * Required: id, title, updated, entries
-    * Recommended: author, link
-    * Optional: category, contributor, generator, icon, logo, rights, subtitle
-
-    All values should be unicode strings except `entries` which is a list of
-    dicts with the following keys:
-
-    * Required: id, title, updated
-    * Recommended: author, link, content, summary
-    * Optional: category, contributor, published, source, rights
-
-    Again, all values should be unicode strings.
-
-    See http://tools.ietf.org/html/rfc4287 and
-    http://www.atomenabled.org/developers/syndication/
+    Abstract builder of an Atom feed for git commits.
     """
-    feed_id = 'http://example.org/feed'
-    entries = []
-    for hash_, commit in get_latest_commits(repo):
-        date = parse_timestamp(commit.commit_time, commit.commit_timezone)
-        message = commit.message.strip()
-        entries.append(dict(
-            id='{}#{}'.format(feed_id, hash_),
-            updated=date.isoformat(),
-            title=message.split('\n', 1)[0],
-            content=message,
-        ))
-    return dict(
-        id=feed_id,
-        title='Git commits',
-        updated=max(entry['updated'] for entry in entries),
-        entries=entries,
-    )
+    def __init__(self, repository_path):
+        self.repository_path = repository_path
+        self.repository = Repo(repository_path)
+
+    def get_entries(self):
+        return get_latest_commits(self.repository)
+
+    def get_entry_title(self, commit):
+        # First line of the commit message.
+        return commit.message.strip().split('\n', 1)[0]
+
+    def get_entry_id(self, commit):
+        # `commit.id` is the SHA1 hash in hex, should be fairly unique
+        return 'git:' + commit.id
+
+    def get_entry_updated(self, commit):
+        return parse_timestamp(commit.commit_time, commit.commit_timezone)
 
 
-def build_commit_feed(repository_path, data_builder=build_feed_data):
+class GithubAtomBuilder(GitCommitsAtomBuilder):
     """
-    Return an Atom feed as a byte string.
+    Builder for a git project on GitHub
+
+    eg. for https://github.com/SimonSapin/GitAtomizer,
+    `github_owner` is 'SimonSapin' and `github_repository` is 'GitAtomizer'.
     """
-    return ''.join(build_atom_feed(data_builder(Repo(repository_path))))
+    def __init__(self, repository_path, github_owner, github_repository):
+        super(GithubAtomBuilder, self).__init__(repository_path)
+        self.github_owner = github_owner
+        self.github_repository = github_repository
+
+    def project_name(self):
+        return '{}/{}'.format(self.github_owner, self.github_repository)
+
+    def get_feed_title(self):
+        return 'Latest commits for ' + self.project_name()
+
+    def github_link(self):
+        return 'https://github.com/' + self.project_name()
+
+    def get_feed_link(self):
+        return self.github_link()
+
+    def get_entry_link(self, commit):
+        return '{}/commit/{}'.format(self.github_link(), commit.id)
 
 
 def main():
-    print build_commit_feed('.')
+    print GithubAtomBuilder('.', 'SimonSapin', 'GitAtomizer').build()
 
 
 if __name__ == '__main__':
